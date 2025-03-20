@@ -5,7 +5,8 @@ import os
 
 import librosa
 import numpy as np
-import soundfile as sf
+
+
 def crop_center(h1, h2):
     h1_shape = h1.size()
     h2_shape = h2.size()
@@ -25,7 +26,7 @@ def crop_center(h1, h2):
 
 
 def wave_to_spectrogram(
-    wave, hop_length, n_fft, mid_side=False, mid_side_b2=False, reverse=False
+        wave, hop_length, n_fft, mid_side=False, mid_side_b2=False, reverse=False
 ):
     if reverse:
         wave_left = np.flip(np.asfortranarray(wave[0]))
@@ -49,7 +50,7 @@ def wave_to_spectrogram(
 
 
 def wave_to_spectrogram_mt(
-    wave, hop_length, n_fft, mid_side=False, mid_side_b2=False, reverse=False
+        wave, hop_length, n_fft, mid_side=False, mid_side_b2=False, reverse=False
 ):
     import threading
 
@@ -91,9 +92,9 @@ def combine_spectrograms(specs, mp):
 
     for d in range(1, bands_n + 1):
         h = mp.param["band"][d]["crop_stop"] - mp.param["band"][d]["crop_start"]
-        spec_c[:, offset : offset + h, :l] = specs[d][
-            :, mp.param["band"][d]["crop_start"] : mp.param["band"][d]["crop_stop"], :l
-        ]
+        spec_c[:, offset: offset + h, :l] = specs[d][
+                                            :, mp.param["band"][d]["crop_start"]: mp.param["band"][d]["crop_stop"], :l
+                                            ]
         offset += h
 
     if offset > mp.param["bins"]:
@@ -101,7 +102,7 @@ def combine_spectrograms(specs, mp):
 
     # lowpass fiter
     if (
-        mp.param["pre_filter_start"] > 0
+            mp.param["pre_filter_start"] > 0
     ):  # and mp.param['band'][bands_n]['res_type'] in ['scipy', 'polyphase']:
         if bands_n == 1:
             spec_c = fft_lp_filter(
@@ -110,7 +111,7 @@ def combine_spectrograms(specs, mp):
         else:
             gp = 1
             for b in range(
-                mp.param["pre_filter_start"] + 1, mp.param["pre_filter_stop"]
+                    mp.param["pre_filter_start"] + 1, mp.param["pre_filter_stop"]
             ):
                 g = math.pow(
                     10, -(b - mp.param["pre_filter_start"]) * (3.5 - gp) / 20.0
@@ -127,7 +128,7 @@ def spectrogram_to_image(spec, mode="magnitude"):
             y = np.abs(spec)
         else:
             y = spec
-        y = np.log10(y**2 + 1e-8)
+        y = np.log10(y ** 2 + 1e-8)
     elif mode == "phase":
         if np.iscomplexobj(spec):
             y = np.angle(spec)
@@ -176,19 +177,19 @@ def mask_silence(mag, ref, thres=0.2, min_range=64, fade_size=32):
 
             if s != 0:
                 weight = np.linspace(0, 1, fade_size)
-                mag[:, :, s : s + fade_size] += weight * ref[:, :, s : s + fade_size]
+                mag[:, :, s: s + fade_size] += weight * ref[:, :, s: s + fade_size]
             else:
                 s -= fade_size
 
             if e != mag.shape[2]:
                 weight = np.linspace(1, 0, fade_size)
-                mag[:, :, e - fade_size : e] += weight * ref[:, :, e - fade_size : e]
+                mag[:, :, e - fade_size: e] += weight * ref[:, :, e - fade_size: e]
             else:
                 e += fade_size
 
-            mag[:, :, s + fade_size : e - fade_size] += ref[
-                :, :, s + fade_size : e - fade_size
-            ]
+            mag[:, :, s + fade_size: e - fade_size] += ref[
+                                                       :, :, s + fade_size: e - fade_size
+                                                       ]
             old_e = e
 
     return mag
@@ -354,17 +355,17 @@ def cmb_spectrogram_to_wave(spec_m, mp, extra_bins_h=None, extra_bins=None):
             shape=(2, bp["n_fft"] // 2 + 1, spec_m.shape[2]), dtype=complex
         )
         h = bp["crop_stop"] - bp["crop_start"]
-        spec_s[:, bp["crop_start"] : bp["crop_stop"], :] = spec_m[
-            :, offset : offset + h, :
-        ]
+        spec_s[:, bp["crop_start"]: bp["crop_stop"], :] = spec_m[
+                                                          :, offset: offset + h, :
+                                                          ]
 
         offset += h
         if d == bands_n:  # higher
             if extra_bins_h:  # if --high_end_process bypass
                 max_bin = bp["n_fft"] // 2
-                spec_s[:, max_bin - extra_bins_h : max_bin, :] = extra_bins[
-                    :, :extra_bins_h, :
-                ]
+                spec_s[:, max_bin - extra_bins_h: max_bin, :] = extra_bins[
+                                                                :, :extra_bins_h, :
+                                                                ]
             if bp["hpf_start"] > 0:
                 spec_s = fft_hp_filter(spec_s, bp["hpf_start"], bp["hpf_stop"] - 1)
             if bands_n == 1:
@@ -438,7 +439,7 @@ def fft_hp_filter(spec, bin_start, bin_stop):
         g -= 1 / (bin_start - bin_stop)
         spec[:, b, :] = g * spec[:, b, :]
 
-    spec[:, 0 : bin_stop + 1, :] *= 0
+    spec[:, 0: bin_stop + 1, :] *= 0
 
     return spec
 
@@ -448,12 +449,12 @@ def mirroring(a, spec_m, input_high_end, mp):
         mirror = np.flip(
             np.abs(
                 spec_m[
-                    :,
-                    mp.param["pre_filter_start"]
-                    - 10
-                    - input_high_end.shape[1] : mp.param["pre_filter_start"]
-                    - 10,
-                    :,
+                :,
+                mp.param["pre_filter_start"]
+                - 10
+                - input_high_end.shape[1]: mp.param["pre_filter_start"]
+                                           - 10,
+                :,
                 ]
             ),
             1,
@@ -468,12 +469,12 @@ def mirroring(a, spec_m, input_high_end, mp):
         mirror = np.flip(
             np.abs(
                 spec_m[
-                    :,
-                    mp.param["pre_filter_start"]
-                    - 10
-                    - input_high_end.shape[1] : mp.param["pre_filter_start"]
-                    - 10,
-                    :,
+                :,
+                mp.param["pre_filter_start"]
+                - 10
+                - input_high_end.shape[1]: mp.param["pre_filter_start"]
+                                           - 10,
+                :,
                 ]
             ),
             1,
@@ -517,152 +518,3 @@ def istft(spec, hl):
     wave_left = librosa.istft(spec_left, hop_length=hl)
     wave_right = librosa.istft(spec_right, hop_length=hl)
     wave = np.asfortranarray([wave_left, wave_right])
-
-#
-# if __name__ == "__main__":
-#     import argparse
-#     import time
-#
-#     import cv2
-#     from model_param_init import ModelParameters
-#
-#     p = argparse.ArgumentParser()
-#     p.add_argument(
-#         "--algorithm",
-#         "-a",
-#         type=str,
-#         choices=["invert", "invert_p", "min_mag", "max_mag", "deep", "align"],
-#         default="min_mag",
-#     )
-#     p.add_argument(
-#         "--model_params",
-#         "-m",
-#         type=str,
-#         default=os.path.join("modelparams", "1band_sr44100_hl512.json"),
-#     )
-#     p.add_argument("--output_name", "-o", type=str, default="output")
-#     p.add_argument("--vocals_only", "-v", action="store_true")
-#     p.add_argument("input", nargs="+")
-#     args = p.parse_args()
-#
-#     start_time = time.time()
-#
-#     if args.algorithm.startswith("invert") and len(args.input) != 2:
-#         raise ValueError("There should be two input files.")
-#
-#     if not args.algorithm.startswith("invert") and len(args.input) < 2:
-#         raise ValueError("There must be at least two input files.")
-#
-#     wave, specs = {}, {}
-#     mp = ModelParameters(args.model_params)
-#
-#     for i in range(len(args.input)):
-#         spec = {}
-#
-#         for d in range(len(mp.param["band"]), 0, -1):
-#             bp = mp.param["band"][d]
-#
-#             if d == len(mp.param["band"]):  # high-end band
-#                 wave[d], _ = librosa.load(
-#                     args.input[i],
-#                     bp["sr"],
-#                     False,
-#                     dtype=np.float32,
-#                     res_type=bp["res_type"],
-#                 )
-#
-#                 if len(wave[d].shape) == 1:  # mono to stereo
-#                     wave[d] = np.array([wave[d], wave[d]])
-#             else:  # lower bands
-#                 wave[d] = librosa.resample(
-#                     wave[d + 1],
-#                     orig_sr=mp.param["band"][d + 1]["sr"],
-#                     target_sr=bp["sr"],
-#                     res_type=bp["res_type"],
-#                 )
-#
-#             spec[d] = wave_to_spectrogram(
-#                 wave[d],
-#                 bp["hl"],
-#                 bp["n_fft"],
-#                 mp.param["mid_side"],
-#                 mp.param["mid_side_b2"],
-#                 mp.param["reverse"],
-#             )
-#
-#         specs[i] = combine_spectrograms(spec, mp)
-#
-#     del wave
-#
-#     if args.algorithm == "deep":
-#         d_spec = np.where(np.abs(specs[0]) <= np.abs(spec[1]), specs[0], spec[1])
-#         v_spec = d_spec - specs[1]
-#         sf.write(
-#             os.path.join("{}.wav".format(args.output_name)),
-#             cmb_spectrogram_to_wave(v_spec, mp),
-#             mp.param["sr"],
-#         )
-#
-#     if args.algorithm.startswith("invert"):
-#         ln = min([specs[0].shape[2], specs[1].shape[2]])
-#         specs[0] = specs[0][:, :, :ln]
-#         specs[1] = specs[1][:, :, :ln]
-#
-#         if "invert_p" == args.algorithm:
-#             X_mag = np.abs(specs[0])
-#             y_mag = np.abs(specs[1])
-#             max_mag = np.where(X_mag >= y_mag, X_mag, y_mag)
-#             v_spec = specs[1] - max_mag * np.exp(1.0j * np.angle(specs[0]))
-#         else:
-#             specs[1] = reduce_vocal_aggressively(specs[0], specs[1], 0.2)
-#             v_spec = specs[0] - specs[1]
-#
-#             if not args.vocals_only:
-#                 X_mag = np.abs(specs[0])
-#                 y_mag = np.abs(specs[1])
-#                 v_mag = np.abs(v_spec)
-#
-#                 X_image = spectrogram_to_image(X_mag)
-#                 y_image = spectrogram_to_image(y_mag)
-#                 v_image = spectrogram_to_image(v_mag)
-#
-#                 cv2.imwrite("{}_X.png".format(args.output_name), X_image)
-#                 cv2.imwrite("{}_y.png".format(args.output_name), y_image)
-#                 cv2.imwrite("{}_v.png".format(args.output_name), v_image)
-#
-#                 sf.write(
-#                     "{}_X.wav".format(args.output_name),
-#                     cmb_spectrogram_to_wave(specs[0], mp),
-#                     mp.param["sr"],
-#                 )
-#                 sf.write(
-#                     "{}_y.wav".format(args.output_name),
-#                     cmb_spectrogram_to_wave(specs[1], mp),
-#                     mp.param["sr"],
-#                 )
-#
-#         sf.write(
-#             "{}_v.wav".format(args.output_name),
-#             cmb_spectrogram_to_wave(v_spec, mp),
-#             mp.param["sr"],
-#         )
-#     else:
-#         if not args.algorithm == "deep":
-#             sf.write(
-#                 os.path.join("ensembled", "{}.wav".format(args.output_name)),
-#                 cmb_spectrogram_to_wave(ensembling(args.algorithm, specs), mp),
-#                 mp.param["sr"],
-#             )
-#
-#     if args.algorithm == "align":
-#         trackalignment = [
-#             {
-#                 "file1": '"{}"'.format(args.input[0]),
-#                 "file2": '"{}"'.format(args.input[1]),
-#             }
-#         ]
-#
-#         for i, e in tqdm(enumerate(trackalignment), desc="Performing Alignment..."):
-#             os.system(f"python lib/align_tracks.py {e['file1']} {e['file2']}")
-#
-#     # print('Total time: {0:.{1}f}s'.format(time.time() - start_time, 1))

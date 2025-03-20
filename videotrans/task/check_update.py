@@ -1,12 +1,10 @@
-# 从日志队列获取日志
-import time
-
 import requests
 from PySide6.QtCore import QThread
 
 import videotrans
-from videotrans.util.tools import  set_process
 from videotrans.configure.config import transobj
+from videotrans.util import tools
+from videotrans.util.tools import set_process
 
 
 class CheckUpdateWorker(QThread):
@@ -16,29 +14,21 @@ class CheckUpdateWorker(QThread):
 
     def get(self):
         try:
-            res=requests.get("https://pyvideotrans.com/version.json")
-            if res.status_code==200:
-                d=res.json()
-                if d['version_num']>videotrans.VERSION_NUM:
+            proxies = None
+            proxy = tools.set_proxy()
+            if proxy:
+                proxies = {"http": proxy, "https": proxy}
+
+            res = requests.get(f"https://pyvideotrans.com/version.json?version={videotrans.VERSION_NUM}",
+                               proxies=proxies)
+            if res.status_code == 200:
+                d = res.json()
+                if d['version_num'] > videotrans.VERSION_NUM:
                     msg = f"{transobj['newversion']}:{d['version']}"
-                    length = len(msg)
-                    while 1:
-                        tmp=""
-                        for i in range(length):
-                            if i == 0:
-                                tmp=msg
-                            elif i == length - 1:
-                                tmp=msg
-                            else:
-                                tmp=msg[i:] + msg[:i]
-                            set_process(tmp,"check_soft_update")
-                            time.sleep(0.2)
-                        time.sleep(5)
-                return True
+                    set_process(text=msg, type="check_soft_update")
         except Exception as e:
             pass
         return False
 
     def run(self):
-        while not self.get():
-            time.sleep(60)
+        self.get()

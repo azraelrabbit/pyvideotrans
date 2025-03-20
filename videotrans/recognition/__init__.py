@@ -1,507 +1,228 @@
-# 语音识别
-import json
-import os
-import re
-import shutil
-import threading
-import time
-from datetime import timedelta
-import torch
-from faster_whisper import WhisperModel
-from pydub import AudioSegment
-from pydub.silence import detect_nonsilent
+from pathlib import Path
+from typing import Union, List, Dict
 
+from videotrans import translator
 from videotrans.configure import config
-from videotrans.util import tools
+# 判断各个语音识别模式是否支持所选语言
+# 支持返回True，不支持返回错误文字字符串
 
+
+
+# 数字代表界面中的现实顺序
+FASTER_WHISPER = 0
+OPENAI_WHISPER = 1
+FUNASR_CN = 2
+STT_API = 3
+DOUBAO_API = 4
+Deepgram = 5
+OPENAI_API = 6
+CUSTOM_API = 7
+GOOGLE_SPEECH = 8
+GEMINI_SPEECH = 9
+Faster_Whisper_XXL = 10
+AI_302 = 11
+ElevenLabs = 12
+
+RECOGN_NAME_LIST = [
+    'faster-whisper(本地)' if config.defaulelang == 'zh' else 'Faster-whisper',
+    'openai-whisper(本地)' if config.defaulelang == 'zh' else 'OpenAI-whisper',
+    "阿里FunASR中文(本地)" if config.defaulelang == 'zh' else "FunASR-Chinese",
+    "STT语音识别(本地)" if config.defaulelang == 'zh' else "STT Speech API",
+    "字节火山字幕生成" if config.defaulelang == 'zh' else "VolcEngine Subtitle API",
+    "Deepgram.com" if config.defaulelang == 'zh' else "Deepgram.com",
+    "OpenAI语音识别" if config.defaulelang == 'zh' else "OpenAI Speech to Text",
+    "自定义识别API" if config.defaulelang == 'zh' else "Custom API",
+    "Google识别API(免费)" if config.defaulelang == 'zh' else "Google Speech to Text",
+    "Gemini大模型识别" if config.defaulelang == 'zh' else "Gemini AI",
+    "Faster-Whisper-XXL.exe",
+    "302.AI",
+    "ElevenLabs.io"
+]
+
+
+def is_allow_lang(langcode: str = None, recogn_type: int = None,model_name=None):
+    if langcode=='auto' and recogn_type not in [FASTER_WHISPER,OPENAI_WHISPER,GEMINI_SPEECH,ElevenLabs]:
+        return '仅在 faster-whisper/openai-whisper/Gemini模式下允许检测语言' if config.defaulelang=='zh' else 'Recognition language is only supported in faster-whisper or openai-whisper or Gemini  modes.'
+    if recogn_type == FUNASR_CN:
+        if model_name=='paraformer-zh' and langcode[:2] !='zh':
+            return 'FunASR 下 paraformer-zh  模型仅支持中文语音识别' if config.defaulelang == 'zh' else 'paraformer-zh  models only support Chinese speech recognition'
+        if model_name =='SenseVoiceSmall' and langcode[:2] not in ['zh','en','ja','ko']:
+            return 'FunASR 下  SenseVoiceSmall 模型仅支持中英日韩语音识别' if config.defaulelang == 'zh' else 'SenseVoiceSmall models only support Chinese,Ja,ko,English speech recognition'
+        return True
+
+    if recogn_type == DOUBAO_API and langcode[:2] not in ["zh", "en", "ja", "ko", "es", "fr", "ru"]:
+        return '豆包语音识别仅支持中英日韩法俄西班牙语言，其他不支持'
+    return True
+
+# 判断 openai whisper和 faster whisper 模型是否存在
+def check_model_name(recogn_type=FASTER_WHISPER, name='',source_language_isLast=False,source_language_currentText=''):
+    if recogn_type not in [OPENAI_WHISPER, FASTER_WHISPER,Faster_Whisper_XXL]:
+        return True
+    # 含 / 的需要下载
+    if name.find('/') > 0:
+        return True
+    if name.endswith('.en') and source_language_isLast:
+        return '.en结尾的模型不可用于自动检测' if config.defaulelang == 'zh' else 'Models ending in .en may not be used for automated detection'
+
+    if name.endswith('.en') and translator.get_code(show_text=source_language_currentText) != 'en':
+        return config.transobj['enmodelerror']
+
+    if recogn_type == OPENAI_WHISPER:
+        if name.startswith('distil'):
+            return 'distil 开头的模型只可用于 faster-whisper本地模式' if config.defaulelang=='zh' else 'distil-* only use when faster-whisper'
+        # 不存在，需下载
+        if not Path(config.ROOT_DIR + f"/models/{name}.pt").exists():
+            return 'download'
+        return True
+    model_path=f'models--Systran--faster-whisper-{name}'
+    if name=='large-v3-turbo':
+        model_path = f'models--mobiuslabsgmbh--faster-whisper-{name}'
+    elif name.startswith('distil'):
+        model_path = f'models--Systran--faster-{name}'
+    
+    file=f'{config.ROOT_DIR}/models/{model_path}'
+    print(file)
+    if recogn_type==Faster_Whisper_XXL:
+        PATH_DIR=Path(config.settings.get('Faster_Whisper_XXL','')).parent.as_posix()+f'/.cache/hub/{model_path}'
+        print(PATH_DIR)
+        if Path(file).exists() or Path(PATH_DIR).exists():
+            if Path(file).exists() and not Path(PATH_DIR).exists():
+                import threading
+                threading.Thread(target=move_model_toxxl,args=(file,PATH_DIR)).start()
+            return True
+        
+    
+    if not Path(file).exists():
+        return 'download'
+    return True
+
+
+
+def move_model_toxxl(src,dest):
+    import shutil
+    config.copying=True
+    shutil.copytree(src,dest,dirs_exist_ok=True)
+    config.copying=False
+
+# 自定义识别、openai-api识别、zh_recogn识别是否填写了相关信息和sk等
+# 正确返回True，失败返回False，并弹窗
+def is_input_api(recogn_type: int = None,return_str=False):
+    from videotrans.winform import recognapi as recognapi_win,  openairecognapi as openairecognapi_win, doubao as doubao_win,sttapi as sttapi_win,deepgram as deepgram_win, gemini as gemini_win,ai302
+    if recogn_type == STT_API and not config.params['stt_url']:
+        if return_str:
+            return "Please configure the api and key information of the stt channel first."
+        sttapi_win.openwin()
+        return False
+        
+    if recogn_type == CUSTOM_API and not config.params['recognapi_url']:
+        if return_str:
+            return "Please configure the api and key information of the CUSTOM_API channel first."
+        recognapi_win.openwin()
+        return False
+
+    if recogn_type == OPENAI_API and not config.params['openairecognapi_key']:
+        if return_str:
+            return "Please configure the api and key information of the OPENAI_API channel first."
+        openairecognapi_win.openwin()
+        return False
+    if recogn_type == DOUBAO_API and not config.params['doubao_appid']:
+        if return_str:
+            return "Please configure the api and key information of the DOUBAO_API channel first."
+        doubao_win.openwin()
+        return False
+    if recogn_type == Deepgram and not config.params['deepgram_apikey']:
+        if return_str:
+            return "Please configure the API Key information of the Deepgram channel first."
+        deepgram_win.openwin()
+        return False
+    if recogn_type == GEMINI_SPEECH and not config.params['gemini_key']:
+        if return_str:
+            return "Please configure the API Key information of the Gemini channel first."
+        gemini_win.openwin()
+        return False
+    if recogn_type == AI_302 and not config.params['ai302_key']:
+        if return_str:
+            return "Please configure the API Key information of the Gemini channel first."
+        ai302.openwin()
+        return False
+    #ElevenLabs
+    if recogn_type == ElevenLabs and not config.params['elevenlabstts_key']:
+        if return_str:
+            return "Please configure the API Key information of the ElevenLabs channel first."
+        from videotrans.winform import elevenlabs as elevenlabs_win
+        elevenlabs_win.openwin()
+        return False
+    return True
 
 # 统一入口
-def run(*, type="all", detect_language=None, audio_file=None,cache_folder=None,model_name=None,set_p=True,inst=None,model_type='faster',is_cuda=None):
-    if config.current_status != 'ing' and config.box_recogn!='ing':
-        return False
-    print(f'{model_type=},{type=}')
-    if model_type=='openai':
-        rs=split_recogn_openai(detect_language=detect_language, audio_file=audio_file,cache_folder=cache_folder,model_name=model_name,set_p=set_p,inst=inst,is_cuda=is_cuda)
-    elif type == "all":
-        rs= all_recogn(detect_language=detect_language, audio_file=audio_file,cache_folder=cache_folder,model_name=model_name,set_p=set_p,inst=inst,is_cuda=is_cuda)
-    elif type=='avg' or os.path.exists(config.rootdir+"/old.txt"):
-        rs=split_recogn_old(detect_language=detect_language, audio_file=audio_file,cache_folder=cache_folder,model_name=model_name,set_p=set_p,inst=inst,is_cuda=is_cuda)
-    else:
-        rs=split_recogn(detect_language=detect_language, audio_file=audio_file,cache_folder=cache_folder,model_name=model_name,set_p=set_p,inst=inst,is_cuda=is_cuda)
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    except:
-        pass
-    return rs
+def run(*,
+        split_type="all",
+        detect_language=None,
+        audio_file=None,
+        cache_folder=None,
+        model_name=None,
+        inst=None,
+        uuid=None,
+        recogn_type: int = 0,
+        is_cuda=None,
+        target_code=None,
+        subtitle_type=0
+        ) -> Union[List[Dict], None]:
+    if config.exit_soft or (config.current_status != 'ing' and config.box_recogn != 'ing'):
+        return
+    if model_name and model_name.startswith('distil-'):
+        model_name = model_name.replace('-whisper', '')
+    kwargs = {
+        "detect_language": detect_language,
+        "audio_file": audio_file,
+        "cache_folder": cache_folder,
+        "model_name": model_name,
+        "uuid": uuid,
+        "inst": inst,
+        "is_cuda": is_cuda,
+        "subtitle_type":subtitle_type,
+        "target_code":target_code
+    }
+    if recogn_type == OPENAI_WHISPER:
+        from ._openai import OpenaiWhisperRecogn
+        return OpenaiWhisperRecogn(**kwargs).run()
+    if recogn_type == GOOGLE_SPEECH:
+        from ._google import GoogleRecogn
+        return GoogleRecogn(**kwargs).run()
 
+    if recogn_type == DOUBAO_API:
+        from ._doubao import DoubaoRecogn
+        return DoubaoRecogn(**kwargs).run()
+    if recogn_type == CUSTOM_API:
+        from ._recognapi import APIRecogn
+        return APIRecogn(**kwargs).run()
+    if recogn_type == STT_API:
+        from ._stt import SttAPIRecogn
+        return SttAPIRecogn(**kwargs).run()
+        
+    if recogn_type == OPENAI_API:
+        from ._openairecognapi import OpenaiAPIRecogn
+        return OpenaiAPIRecogn(**kwargs).run()
+    if recogn_type==FUNASR_CN:
+        from ._funasr import FunasrRecogn
+        return FunasrRecogn(**kwargs).run()
+    if recogn_type==Deepgram:
+        from ._deepgram import DeepgramRecogn
+        return DeepgramRecogn(**kwargs).run()
+    if recogn_type==GEMINI_SPEECH:
+        from ._gemini import GeminiRecogn
+        return GeminiRecogn(**kwargs).run()
+    if recogn_type==AI_302:
+        from ._ai302 import AI302Recogn
+        return AI302Recogn(**kwargs).run()
 
+    if recogn_type==ElevenLabs:
+        from ._elevenlabs import ElevenLabsRecogn
+        return ElevenLabsRecogn(**kwargs).run()
 
-# 整体识别，全部传给模型
-def all_recogn(*, detect_language=None, audio_file=None, cache_folder=None,model_name="base",set_p=True,inst=None,is_cuda=None):
-    if config.current_status != 'ing' and config.box_recogn!='ing':
-        return False
-    if set_p:
-        tools.set_process(f"{config.params['whisper_model']} {config.transobj['kaishishibie']}")
-    down_root = os.path.normpath(config.rootdir + "/models")
-    model=None
-    try:
-        model = WhisperModel(model_name, device="cuda" if is_cuda else "cpu",
-                             compute_type=config.settings['cuda_com_type'],
-                             download_root=down_root,
-                             num_workers=config.settings['whisper_worker'],
-                             cpu_threads=os.cpu_count() if int(config.settings['whisper_threads']) < 1 else int(config.settings['whisper_threads']),
-                             local_files_only=True)
-        if config.current_status != 'ing' and config.box_recogn!='ing':
-            return False
-        if audio_file.endswith('.m4a'):
-            wavfile = cache_folder + "/tmp.wav"
-            tools.m4a2wav(audio_file, wavfile)
-        else:
-            wavfile=audio_file
-        if not os.path.exists(wavfile):
-            raise Exception(f'[error]not exists {wavfile}')
-        segments, info = model.transcribe(wavfile,
-                                          beam_size=config.settings['beam_size'],
-                                          best_of=config.settings['best_of'],
-                                          condition_on_previous_text=config.settings['condition_on_previous_text'],
+    if split_type == 'avg':
+        from ._average import FasterAvg
+        return FasterAvg(**kwargs).run()
 
-                                          temperature=0 if config.settings['temperature']==0 else [0.0,0.2,0.4,0.6,0.8,1.0],
-                                          vad_filter=bool(config.settings['vad']),
-                                          vad_parameters=dict(
-                                              min_silence_duration_ms=config.settings['overall_silence'],
-                                              max_speech_duration_s=config.settings['overall_maxsecs']
-                                           ),
-                                          word_timestamps=True,
-                                          language=detect_language,
-                                          initial_prompt=None if detect_language!='zh' else config.settings['initial_prompt_zh'])
-
-        # 保留原始语言的字幕
-        raw_subtitles = []
-        sidx = -1
-        for segment in segments:
-            if config.current_status != 'ing' and config.box_recogn !='ing':
-                del model
-                return None
-            sidx += 1
-            start = int(segment.words[0].start * 1000)
-            end = int(segment.words[-1].end * 1000)
-            # if start == end:
-            #     end += 200
-            startTime = tools.ms_to_time_string(ms=start)
-            endTime = tools.ms_to_time_string(ms=end)
-            text = segment.text.strip().replace('&#39;', "'")
-            if detect_language=='zh' and text==config.settings['initial_prompt_zh']:
-                continue
-            text = re.sub(r'&#\d+;', '', text)
-            # 无有效字符
-            if not text or re.match(r'^[，。、？‘’“”；：（｛｝【】）:;"\'\s \d`!@#$%^&*()_+=.,?/\\-]*$', text) or len(text) <= 1:
-                continue
-            # 原语言字幕
-            s = {"line": len(raw_subtitles) + 1, "time": f"{startTime} --> {endTime}", "text": text}
-            raw_subtitles.append(s)
-            if set_p:
-                tools.set_process(f'{s["line"]}\n{startTime} --> {endTime}\n{text}\n\n', 'subtitle')
-                if inst and inst.precent<55:
-                    inst.precent += round(segment.end*0.5  / info.duration, 2)
-                tools.set_process( f'{config.transobj["zimuhangshu"]} {s["line"]}')
-            else:
-                tools.set_process_box(f'{s["line"]}\n{startTime} --> {endTime}\n{text}\n\n', func_name="set_subtitle")
-
-        if audio_file.endswith('.m4a') and os.path.exists(wavfile):
-            os.unlink(wavfile)
-        return raw_subtitles
-    except Exception as e:
-        raise Exception(f'whole all {str(e)}')
-    finally:
-        try:
-            if model:
-                del model
-        except:
-            pass
-
-
-#
-def match_target_amplitude(sound, target_dBFS):
-    change_in_dBFS = target_dBFS - sound.dBFS
-    return sound.apply_gain(change_in_dBFS)
-
-
-# split audio by silence
-def shorten_voice(normalized_sound,max_interval=60000):
-    normalized_sound = match_target_amplitude(normalized_sound, -20.0)
-    nonsilent_data = []
-    audio_chunks = detect_nonsilent(normalized_sound, min_silence_len=int(config.settings['voice_silence']), silence_thresh=-20 - 25)
-    for i, chunk in enumerate(audio_chunks):
-        start_time, end_time = chunk
-        n = 0
-        while end_time - start_time >= max_interval:
-            n += 1
-            # new_end = start_time + max_interval+buffer
-            new_end = start_time + max_interval
-            new_start = start_time
-            nonsilent_data.append((new_start, new_end, True))
-            start_time += max_interval
-        nonsilent_data.append((start_time, end_time, False))
-    return nonsilent_data
-
-# 预先分割识别
-def split_recogn(*, detect_language=None, audio_file=None, cache_folder=None,model_name="base",set_p=True,inst=None,is_cuda=None):
-    if set_p:
-        tools.set_process(config.transobj['fengeyinpinshuju'])
-    if config.current_status != 'ing' and config.box_recogn!='ing':
-        return False
-    noextname=os.path.basename(audio_file)
-    tmp_path = f'{cache_folder}/{noextname}_tmp'
-    if not os.path.isdir(tmp_path):
-        try:
-            os.makedirs(tmp_path, 0o777, exist_ok=True)
-        except:
-            raise config.Myexcept(config.transobj["createdirerror"])
-    if audio_file.endswith('.m4a'):
-        wavfile = cache_folder + "/tmp.wav"
-        tools.m4a2wav(audio_file, wavfile)
-    else:
-        wavfile=audio_file
-    if not os.path.exists(wavfile):
-        raise Exception(f'[error]not exists {wavfile}')
-    normalized_sound = AudioSegment.from_wav(wavfile)  # -20.0
-    nonslient_file = f'{tmp_path}/detected_voice.json'
-    if os.path.exists(nonslient_file) and os.path.getsize(nonslient_file):
-        with open(nonslient_file, 'r') as infile:
-            nonsilent_data = json.load(infile)
-    else:
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            raise config.Myexcept("stop")
-        if inst and inst.precent < 55:
-            inst.precent += 0.1
-        tools.set_process(config.transobj['qiegeshujuhaoshi'])
-        nonsilent_data = shorten_voice(normalized_sound)
-        with open(nonslient_file, 'w') as outfile:
-            json.dump(nonsilent_data, outfile)
-
-    raw_subtitles = []
-    total_length = len(nonsilent_data)
-    try:
-        model = WhisperModel(model_name, device="cuda" if is_cuda else "cpu",
-                         compute_type=config.settings['cuda_com_type'],
-                         download_root=config.rootdir + "/models",
-                         local_files_only=True)
-    except Exception as e:
-        raise Exception(str(e.args))
-    for i, duration in enumerate(nonsilent_data):
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            del model
-            return None
-        start_time, end_time, buffered = duration
-
-        chunk_filename = tmp_path + f"/c{i}_{start_time // 1000}_{end_time // 1000}.wav"
-        audio_chunk = normalized_sound[start_time:end_time]
-        audio_chunk.export(chunk_filename, format="wav")
-
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            del model
-            raise config.Myexcept("stop")
-        text = ""
-        try:
-            segments, _ = model.transcribe(chunk_filename,
-                                           beam_size=config.settings['beam_size'],
-                                           best_of=config.settings['best_of'],
-                                           condition_on_previous_text=config.settings['condition_on_previous_text'],
-                                           temperature=0 if config.settings['temperature']==0 else [0.0,0.2,0.4,0.6,0.8,1.0],
-                                           vad_filter=bool(config.settings['vad']),
-                                           vad_parameters=dict(
-                                               min_silence_duration_ms=config.settings['overall_silence'],
-                                              max_speech_duration_s=config.settings['overall_maxsecs']
-                                           ),
-                                           word_timestamps=True,
-                                           language=detect_language,
-                                           initial_prompt=None if detect_language!='zh' else config.settings['initial_prompt_zh'],)
-            for t in segments:
-
-                if detect_language=='zh' and t.text==config.settings['initial_prompt_zh']:
-                    continue
-                start_time, end_time, buffered = duration
-                text = t.text
-                text = f"{text.capitalize()}. ".replace('&#39;', "'")
-                text = re.sub(r'&#\d+;', '', text).strip().strip('.')
-                if detect_language == 'zh' and text == config.settings['initial_prompt_zh']:
-                    continue
-                if not text or re.match(r'^[，。、？‘’“”；：（｛｝【】）:;"\'\s \d`!@#$%^&*()_+=.,?/\\-]*$', text):
-                    continue
-                end_time=start_time+t.words[-1].end*1000
-                start_time+=t.words[0].start*1000
-                start = timedelta(milliseconds=start_time)
-                stmp = str(start).split('.')
-                if len(stmp) == 2:
-                    start = f'{stmp[0]},{int(int(stmp[-1]) / 1000)}'
-                end = timedelta(milliseconds=end_time)
-                etmp = str(end).split('.')
-                if len(etmp) == 2:
-                    end = f'{etmp[0]},{int(int(etmp[-1]) / 1000)}'
-                srt_line = {"line": len(raw_subtitles) + 1, "time": f"{start} --> {end}", "text": text}
-                raw_subtitles.append(srt_line)
-                if set_p:
-                    if inst and inst.precent < 55:
-                        inst.precent += 0.1
-                    tools.set_process(f"{config.transobj['yuyinshibiejindu']} {srt_line['line']}")
-                    msg = f"{srt_line['line']}\n{srt_line['time']}\n{srt_line['text']}\n\n"
-                    tools.set_process(msg, 'subtitle')
-                else:
-                    tools.set_process_box(f"{srt_line['line']}\n{srt_line['time']}\n{srt_line['text']}\n\n", func_name="set_subtitle")
-        except Exception as e:
-            del model
-            raise  Exception(str(e.args))
-
-
-    if set_p:
-        tools.set_process(f"{config.transobj['yuyinshibiewancheng']} / {len(raw_subtitles)}", 'logs')
-    # 写入原语言字幕到目标文件夹
-    if audio_file.endswith('.m4a')  and os.path.exists(wavfile):
-        os.unlink(wavfile)
-    try:
-        shutil.rmtree(tmp_path,True)
-    except:
-        pass
-    return raw_subtitles
-
-
-
-
-# split audio by silence
-def shorten_voice_old(normalized_sound):
-    normalized_sound = match_target_amplitude(normalized_sound, -20.0)
-    max_interval = config.settings['interval_split']*1000
-    buffer = int(config.settings['voice_silence'])
-    nonsilent_data = []
-    audio_chunks = detect_nonsilent(normalized_sound, min_silence_len=int(config.settings['voice_silence']),silence_thresh=-20 - 25)
-    # print(audio_chunks)
-    for i, chunk in enumerate(audio_chunks):
-        start_time, end_time = chunk
-        n = 0
-        while end_time - start_time >= max_interval:
-            n += 1
-            # new_end = start_time + max_interval+buffer
-            new_end = start_time + max_interval + buffer
-            new_start = start_time
-            nonsilent_data.append((new_start, new_end, True))
-            start_time += max_interval
-        nonsilent_data.append((start_time, end_time, False))
-    return nonsilent_data
-
-
-
-# openai
-def split_recogn_openai(*, detect_language=None, audio_file=None, cache_folder=None,model_name="base",set_p=True,inst=None,is_cuda=None):
-    import whisper
-    if set_p:
-        tools.set_process(config.transobj['fengeyinpinshuju'])
-    if config.current_status != 'ing' and config.box_recogn!='ing':
-        return False
-    noextname=os.path.basename(audio_file)
-    tmp_path = f'{cache_folder}/{noextname}_tmp'
-    if not os.path.isdir(tmp_path):
-        try:
-            os.makedirs(tmp_path, 0o777, exist_ok=True)
-        except:
-            raise config.Myexcept(config.transobj["createdirerror"])
-    if audio_file.endswith('.m4a'):
-        wavfile = cache_folder + "/tmp.wav"
-        tools.m4a2wav(audio_file, wavfile)
-    else:
-        wavfile=audio_file
-    if not os.path.exists(wavfile):
-        raise Exception(f'[error]not exists {wavfile}')
-    normalized_sound = AudioSegment.from_wav(wavfile)  # -20.0
-    nonslient_file = f'{tmp_path}/detected_voice.json'
-    if os.path.exists(nonslient_file) and os.path.getsize(nonslient_file):
-        with open(nonslient_file, 'r') as infile:
-            nonsilent_data = json.load(infile)
-    else:
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            raise config.Myexcept("stop")
-        if inst and inst.precent < 55:
-            inst.precent += 0.1
-        tools.set_process(config.transobj['qiegeshujuhaoshi'])
-        nonsilent_data = shorten_voice_old(normalized_sound)
-        with open(nonslient_file, 'w') as outfile:
-            json.dump(nonsilent_data, outfile)
-
-    raw_subtitles = []
-    total_length = len(nonsilent_data)
-    try:
-        model = whisper.load_model(model_name,
-               device="cuda" if is_cuda else "cpu",
-               download_root=config.rootdir + "/models"
-        )
-    except Exception as e:
-        raise Exception(str(e.args))
-    for i, duration in enumerate(nonsilent_data):
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            del model
-            raise config.Myexcept("stop")
-        start_time, end_time, buffered = duration
-        if start_time == end_time:
-            end_time += 200
-        chunk_filename = tmp_path + f"/c{i}_{start_time // 1000}_{end_time // 1000}.wav"
-        audio_chunk = normalized_sound[start_time:end_time]
-        audio_chunk.export(chunk_filename, format="wav")
-
-        if config.current_status != 'ing' and config.box_recogn != 'ing':
-            del model
-            raise config.Myexcept("stop")
-        text = ""
-        try:
-
-            tr=model.transcribe(chunk_filename,
-                        language=detect_language,
-                        initial_prompt=None if detect_language!='zh' else config.settings['initial_prompt_zh'],
-                        condition_on_previous_text=config.settings['condition_on_previous_text']
-            )
-            for t in tr['segments']:
-                if detect_language=='zh' and t['text'].strip()==config.settings['initial_prompt_zh']:
-                    continue
-                text += t['text'] + " "
-        except Exception as e:
-            del model
-            raise  Exception(str(e.args))
-
-        text = f"{text.capitalize()}. ".replace('&#39;', "'")
-        text = re.sub(r'&#\d+;', '', text).strip()
-        if not text or re.match(r'^[，。、？‘’“”；：（｛｝【】）:;"\'\s \d`!@#$%^&*()_+=.,?/\\-]*$', text):
-            continue
-        start = timedelta(milliseconds=start_time)
-        stmp = str(start).split('.')
-        if len(stmp) == 2:
-            start = f'{stmp[0]},{int(int(stmp[-1]) / 1000)}'
-        end = timedelta(milliseconds=end_time)
-        etmp = str(end).split('.')
-        if len(etmp) == 2:
-            end = f'{etmp[0]},{int(int(etmp[-1]) / 1000)}'
-        srt_line = {"line": len(raw_subtitles)+1, "time": f"{start} --> {end}", "text": text}
-        raw_subtitles.append(srt_line)
-        if set_p:
-            if inst and inst.precent<55:
-                inst.precent += round(srt_line['line']*5  / total_length, 2)
-            tools.set_process(f"{config.transobj['yuyinshibiejindu']} {srt_line['line']}/{total_length}")
-            msg = f"{srt_line['line']}\n{srt_line['time']}\n{srt_line['text']}\n\n"
-            tools.set_process(msg, 'subtitle')
-        else:
-            tools.set_process_box(f"{srt_line['line']}\n{srt_line['time']}\n{srt_line['text']}\n\n", func_name="set_subtitle")
-    if set_p:
-        tools.set_process(f"{config.transobj['yuyinshibiewancheng']} / {len(raw_subtitles)}", 'logs')
-    # 写入原语言字幕到目标文件夹
-    if audio_file.endswith('.m4a')  and os.path.exists(wavfile):
-        os.unlink(wavfile)
-    try:
-        shutil.rmtree(tmp_path,True)
-    except:
-        pass
-    return raw_subtitles
-
-
-
-
-
-# 均等分割识别
-def split_recogn_old(*, detect_language=None, audio_file=None, cache_folder=None,model_name="base",set_p=True,inst=None,is_cuda=None):
-    print(f'avg分割==')
-    if set_p:
-        tools.set_process(config.transobj['fengeyinpinshuju'])
-    if config.current_status != 'ing' and config.box_recogn!='ing':
-        return False
-    noextname=os.path.basename(audio_file)
-    tmp_path = f'{cache_folder}/{noextname}_tmp'
-    if not os.path.isdir(tmp_path):
-        try:
-            os.makedirs(tmp_path, 0o777, exist_ok=True)
-        except:
-            raise config.Myexcept(config.transobj["createdirerror"])
-    if audio_file.endswith('.m4a'):
-        wavfile = cache_folder + "/tmp.wav"
-        tools.m4a2wav(audio_file, wavfile)
-    else:
-        wavfile=audio_file
-    if not os.path.exists(wavfile):
-        raise Exception(f'[error]not exists {wavfile}')
-    normalized_sound = AudioSegment.from_wav(wavfile)  # -20.0
-    nonslient_file = f'{tmp_path}/detected_voice.json'
-    if os.path.exists(nonslient_file) and os.path.getsize(nonslient_file):
-        with open(nonslient_file, 'r') as infile:
-            nonsilent_data = json.load(infile)
-    else:
-        if config.current_status != 'ing' and config.box_recogn!='ing':
-            raise config.Myexcept("stop")
-        nonsilent_data = shorten_voice_old(normalized_sound)
-        with open(nonslient_file, 'w') as outfile:
-            json.dump(nonsilent_data, outfile)
-
-    raw_subtitles = []
-    total_length = len(nonsilent_data)
-    start_t = time.time()
-    try:
-        model = WhisperModel(model_name, device="cuda" if config.params['cuda'] else "cpu",
-                         compute_type=config.settings['cuda_com_type'],
-                         download_root=config.rootdir + "/models",
-                         local_files_only=True)
-    except Exception as e:
-        raise Exception(str(e.args))
-    for i, duration in enumerate(nonsilent_data):
-        # config.temp = {}
-        if config.current_status != 'ing' and config.box_recogn!='ing':
-            del model
-            raise config.Myexcept("stop")
-        start_time, end_time, buffered = duration
-        if start_time == end_time:
-            end_time += 200
-
-        chunk_filename = tmp_path + f"/c{i}_{start_time // 1000}_{end_time // 1000}.wav"
-        audio_chunk = normalized_sound[start_time:end_time]
-        audio_chunk.export(chunk_filename, format="wav")
-
-        if config.current_status != 'ing' and config.box_recogn!='ing':
-            del model
-            raise config.Myexcept("stop")
-        text = ""
-        try:
-            segments, _ = model.transcribe(chunk_filename,
-                                           beam_size=5,
-                                           best_of=5,
-                                           condition_on_previous_text=True,
-                                           language=detect_language,
-                                           initial_prompt=None if detect_language!='zh' else config.settings['initial_prompt_zh'],)
-            for t in segments:
-                text += t.text + " "
-        except Exception as e:
-            del model
-            raise  Exception(str(e.args))
-
-        text = f"{text.capitalize()}. ".replace('&#39;', "'")
-        text = re.sub(r'&#\d+;', '', text).strip()
-        if not text or re.match(r'^[，。、？‘’“”；：（｛｝【】）:;"\'\s \d`!@#$%^&*()_+=.,?/\\-]*$', text):
-            continue
-        start = timedelta(milliseconds=start_time)
-        stmp = str(start).split('.')
-        if len(stmp) == 2:
-            start = f'{stmp[0]},{int(int(stmp[-1]) / 1000)}'
-        end = timedelta(milliseconds=end_time)
-        etmp = str(end).split('.')
-        if len(etmp) == 2:
-            end = f'{etmp[0]},{int(int(etmp[-1]) / 1000)}'
-        srt_line = {"line": len(raw_subtitles)+1, "time": f"{start} --> {end}", "text": text}
-        raw_subtitles.append(srt_line)
-        if set_p:
-            if inst and inst.precent<55:
-                inst.precent += round(srt_line['line']*5  / total_length, 2)
-            tools.set_process(f"{config.transobj['yuyinshibiejindu']} {srt_line['line']}/{total_length}")
-            msg = f"{srt_line['line']}\n{srt_line['time']}\n{srt_line['text']}\n\n"
-            tools.set_process(msg, 'subtitle')
-
-    print(f'用时 {time.time() - start_t}')
-    if set_p:
-        tools.set_process(f"{config.transobj['yuyinshibiewancheng']} / {len(raw_subtitles)}", 'logs')
-    # 写入原语言字幕到目标文件夹
-    if os.path.exists(wavfile):
-        os.unlink(wavfile)
-    return raw_subtitles
-
+    from ._overall import FasterAll
+    return FasterAll(**kwargs).run()
